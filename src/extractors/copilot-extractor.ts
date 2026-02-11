@@ -6,22 +6,34 @@ import { BaseExtractor } from "./base-extractor.js";
 import { withSqliteReader } from "../utils/sqlite-reader.js";
 import type { Conversation, Message } from "../models/types.js";
 
-interface CopilotChatTurn {
-  readonly request?: string;
-  readonly response?: string;
-  readonly agent?: string;
-  readonly timestamp?: number;
+/**
+ * Session index entry from state.vscdb key "chat.ChatSessionStore.index".
+ */
+interface CopilotSessionMeta {
+  readonly sessionId: string;
+  readonly title?: string;
+  readonly lastMessageDate?: number;
+  readonly isEmpty?: boolean;
 }
 
-interface CopilotSession {
-  readonly sessionId?: string;
-  readonly requester?: { readonly id?: string };
-  readonly turns?: readonly CopilotChatTurn[];
-  readonly creationDate?: number;
+interface SessionIndex {
+  readonly version?: number;
+  readonly entries?: Record<string, CopilotSessionMeta>;
 }
 
-interface WorkspaceChunks {
-  readonly sessions?: readonly CopilotSession[];
+/**
+ * Prompt entry from "memento/interactive-session" -> history.copilot.
+ */
+interface HistoryEntry {
+  readonly text?: string;
+  readonly state?: unknown;
+}
+
+interface InteractiveSession {
+  readonly history?: {
+    readonly editor?: readonly HistoryEntry[];
+    readonly copilot?: readonly HistoryEntry[];
+  };
 }
 
 export class CopilotExtractor extends BaseExtractor {
@@ -84,20 +96,15 @@ export class CopilotExtractor extends BaseExtractor {
         }
 
         const wsDir = path.join(storagePath, ws.name);
-
-        // Try workspace-chunks.json first (newer Copilot)
-        const chunksPath = path.join(wsDir, "GitHub.copilot-chat", "workspace-chunks.json");
-        if (await this.pathExists(chunksPath)) {
-          const convs = this.parseWorkspaceChunks(chunksPath);
-          conversations.push(...convs);
-          continue;
-        }
-
-        // Fallback: try state.vscdb SQLite
         const vscdbPath = path.join(wsDir, "state.vscdb");
+
         if (await this.pathExists(vscdbPath)) {
-          const convs = await this.parseVscdb(vscdbPath);
-          conversations.push(...convs);
+          try {
+            const convs = await this.parseVscdb(vscdbPath);
+            conversations.push(...convs);
+          } catch {
+            // Individual workspace failure shouldn't stop others
+          }
         }
       }
     } catch {
@@ -107,114 +114,115 @@ export class CopilotExtractor extends BaseExtractor {
     return conversations;
   }
 
-  private parseWorkspaceChunks(filePath: string): Conversation[] {
-    try {
-      const content = fs.readFileSync(filePath, "utf-8");
-      const data = JSON.parse(content) as WorkspaceChunks;
-
-      if (!data.sessions) {
+  private async parseVscdb(dbPath: string): Promise<Conversation[]> {
+    return await withSqliteReader(dbPath, (reader) => {
+      if (!reader.tableExists("ItemTable")) {
         return [];
       }
 
-      return data.sessions
-        .map((session) => this.sessionToConversation(session, filePath))
-        .filter((c): c is Conversation => c !== null);
-    } catch {
-      return [];
-    }
-  }
+      // Read session index for metadata (titles, dates, session IDs)
+      const indexValue = reader.getKeyValue("ItemTable", "chat.ChatSessionStore.index");
+      if (!indexValue) {
+        return [];
+      }
 
-  private async parseVscdb(dbPath: string): Promise<Conversation[]> {
-    try {
-      return await withSqliteReader(dbPath, (reader) => {
-        if (!reader.tableExists("ItemTable")) {
-          return [];
+      let sessionIndex: SessionIndex;
+      try {
+        sessionIndex = JSON.parse(indexValue) as SessionIndex;
+      } catch {
+        return [];
+      }
+
+      const entries = sessionIndex.entries;
+      if (!entries || Object.keys(entries).length === 0) {
+        return [];
+      }
+
+      // Read prompt history for the actual user message text
+      const historyValue = reader.getKeyValue("ItemTable", "memento/interactive-session");
+      let prompts: readonly HistoryEntry[] = [];
+      if (historyValue) {
+        try {
+          const session = JSON.parse(historyValue) as InteractiveSession;
+          prompts = session.history?.copilot ?? [];
+        } catch {
+          // history parsing failed, continue with session index only
+        }
+      }
+
+      // Build conversations from session entries
+      // Each session entry becomes a conversation with user prompts
+      const conversations: Conversation[] = [];
+      const sessionEntries = Object.values(entries);
+
+      for (const meta of sessionEntries) {
+        if (meta.isEmpty) {
+          continue;
         }
 
-        // Look for Copilot chat sessions in the memento store
-        const value = reader.getKeyValue("ItemTable", "memento/interactive-session");
-        if (!value) {
-          return [];
+        const convIdInput = `copilot:${dbPath}:${meta.sessionId}`;
+        const convId = this.deterministicId(convIdInput);
+        const messages: Message[] = [];
+
+        // Match the session to prompts by title prefix
+        const sessionTitle = meta.title ?? "";
+        const matchedPrompt = prompts.find(
+          (p) => p.text && sessionTitle.startsWith(p.text.slice(0, 40)),
+        );
+
+        if (matchedPrompt?.text) {
+          messages.push({
+            id: this.deterministicId(`${convIdInput}:user:0`),
+            conversationId: convId,
+            role: "user",
+            content: matchedPrompt.text,
+            sourceModel: null,
+            timestamp: meta.lastMessageDate
+              ? new Date(meta.lastMessageDate).toISOString()
+              : new Date().toISOString(),
+            metadata: {},
+          });
+        } else if (sessionTitle) {
+          // Use the title as a truncated version of the user message
+          messages.push({
+            id: this.deterministicId(`${convIdInput}:user:0`),
+            conversationId: convId,
+            role: "user",
+            content: sessionTitle,
+            sourceModel: null,
+            timestamp: meta.lastMessageDate
+              ? new Date(meta.lastMessageDate).toISOString()
+              : new Date().toISOString(),
+            metadata: {},
+          });
         }
 
-        const data = JSON.parse(value) as WorkspaceChunks;
-        if (!data.sessions) {
-          return [];
+        if (messages.length === 0) {
+          continue;
         }
 
-        return data.sessions
-          .map((session) => this.sessionToConversation(session, dbPath))
-          .filter((c): c is Conversation => c !== null);
-      });
-    } catch {
-      return [];
-    }
-  }
+        const createdAt = meta.lastMessageDate
+          ? new Date(meta.lastMessageDate).toISOString()
+          : new Date().toISOString();
 
-  private sessionToConversation(session: CopilotSession, sourcePath: string): Conversation | null {
-    if (!session.turns || session.turns.length === 0) {
-      return null;
-    }
-
-    const messages: Message[] = [];
-    const convIdInput = `copilot:${sourcePath}:${session.sessionId ?? "unknown"}`;
-    const convId = this.deterministicId(convIdInput);
-
-    for (const turn of session.turns) {
-      const timestamp = turn.timestamp
-        ? new Date(turn.timestamp).toISOString()
-        : new Date().toISOString();
-
-      if (turn.request) {
-        messages.push({
-          id: this.deterministicId(`${convIdInput}:user:${messages.length}`),
-          conversationId: convId,
-          role: "user",
-          content: turn.request,
-          sourceModel: null,
-          timestamp,
-          metadata: turn.agent ? { agent: turn.agent } : {},
+        conversations.push({
+          id: convId,
+          title: sessionTitle || this.deriveTitle(messages),
+          sourceIde: "copilot",
+          sourceHash: this.generateSourceHash("copilot", messages),
+          workspacePath: this.extractWorkspaceFromPath(dbPath),
+          createdAt,
+          updatedAt: createdAt,
+          messages,
         });
       }
 
-      if (turn.response) {
-        messages.push({
-          id: this.deterministicId(`${convIdInput}:assistant:${messages.length}`),
-          conversationId: convId,
-          role: "assistant",
-          content: turn.response,
-          sourceModel: "gpt-4o",
-          timestamp,
-          metadata: {},
-        });
-      }
-    }
-
-    if (messages.length === 0) {
-      return null;
-    }
-
-    const createdAt = session.creationDate
-      ? new Date(session.creationDate).toISOString()
-      : messages[0]?.timestamp ?? new Date().toISOString();
-
-    return {
-      id: convId,
-      title: this.deriveTitle(messages),
-      sourceIde: "copilot",
-      sourceHash: this.generateSourceHash("copilot", messages),
-      workspacePath: this.extractWorkspaceFromPath(sourcePath),
-      createdAt,
-      updatedAt: messages[messages.length - 1]?.timestamp ?? createdAt,
-      messages,
-    };
+      return conversations;
+    });
   }
 
-  private extractWorkspaceFromPath(filePath: string): string | null {
-    // Try to read workspace.json in the same workspace storage dir
-    const wsDir = path.dirname(
-      filePath.includes("GitHub.copilot-chat") ? path.dirname(filePath) : filePath,
-    );
+  private extractWorkspaceFromPath(dbPath: string): string | null {
+    const wsDir = path.dirname(dbPath);
     const workspaceFile = path.join(wsDir, "workspace.json");
     try {
       const content = fs.readFileSync(workspaceFile, "utf-8");
@@ -234,16 +242,17 @@ export class CopilotExtractor extends BaseExtractor {
     for (const basePath of this.getStorageBasePaths()) {
       try {
         const watcher = fs.watch(basePath, { recursive: true }, (_, filename) => {
-          if (
-            typeof filename === "string" &&
-            (filename.endsWith("workspace-chunks.json") || filename.endsWith("state.vscdb"))
-          ) {
+          if (typeof filename === "string" && filename.endsWith("state.vscdb")) {
             const fullPath = path.join(basePath, filename);
-            if (filename.endsWith("workspace-chunks.json")) {
-              for (const conv of this.parseWorkspaceChunks(fullPath)) {
-                cb(conv);
-              }
-            }
+            void this.parseVscdb(fullPath)
+              .then((convs) => {
+                for (const conv of convs) {
+                  cb(conv);
+                }
+              })
+              .catch(() => {
+                // Ignore watch errors
+              });
           }
         });
         watchers.push(watcher);

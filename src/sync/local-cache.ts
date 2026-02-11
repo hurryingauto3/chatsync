@@ -1,4 +1,5 @@
-import initSqlJs, { type Database as SqlJsDatabase, type SqlValue } from "sql.js";
+import { type Database as SqlJsDatabase, type SqlValue } from "sql.js";
+import { getSqlJs } from "../utils/sql-init.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type * as vscode from "vscode";
@@ -43,7 +44,7 @@ export class LocalCache implements vscode.Disposable {
   }
 
   async initialize(): Promise<void> {
-    const SQL = await initSqlJs();
+    const SQL = await getSqlJs();
 
     // Load existing database or create new one
     if (fs.existsSync(this.dbPath)) {
@@ -111,7 +112,10 @@ export class LocalCache implements vscode.Disposable {
   // ── Conversations ──
 
   upsertConversation(conv: Conversation, userId: string, synced: boolean = false): void {
-    const db = this.ensureDb();
+    const db = this.db;
+    if (!db) {
+      return;
+    }
     db.run(
       `INSERT INTO conversations (id, user_id, title, source_ide, source_hash, workspace_path, created_at, updated_at, synced, local_updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -126,6 +130,9 @@ export class LocalCache implements vscode.Disposable {
   }
 
   getConversation(id: string): (Conversation & { messages: Message[] }) | null {
+    if (!this.db) {
+      return null;
+    }
     const rows = this.queryRows<ConversationDbRow>("SELECT * FROM conversations WHERE id = ?", [id]);
     if (rows.length === 0) {
       return null;
@@ -135,6 +142,9 @@ export class LocalCache implements vscode.Disposable {
   }
 
   getConversationByHash(sourceHash: string): (Conversation & { messages: Message[] }) | null {
+    if (!this.db) {
+      return null;
+    }
     const rows = this.queryRows<ConversationDbRow>("SELECT * FROM conversations WHERE source_hash = ?", [sourceHash]);
     if (rows.length === 0) {
       return null;
@@ -145,6 +155,9 @@ export class LocalCache implements vscode.Disposable {
   }
 
   getConversations(filter?: ConversationFilter): readonly Conversation[] {
+    if (!this.db) {
+      return [];
+    }
     const conditions: string[] = [];
     const params: unknown[] = [];
 
@@ -187,14 +200,20 @@ export class LocalCache implements vscode.Disposable {
   }
 
   markConversationSynced(id: string): void {
-    this.ensureDb().run("UPDATE conversations SET synced = 1 WHERE id = ?", [id]);
+    if (!this.db) {
+      return;
+    }
+    this.db.run("UPDATE conversations SET synced = 1 WHERE id = ?", [id]);
     this.persist();
   }
 
   // ── Messages ──
 
   upsertMessages(messages: readonly Message[], synced: boolean = false): void {
-    const db = this.ensureDb();
+    const db = this.db;
+    if (!db) {
+      return;
+    }
     for (const msg of messages) {
       db.run(
         `INSERT INTO messages (id, conversation_id, role, content, source_model, timestamp, metadata, synced, local_updated_at)
@@ -232,7 +251,10 @@ export class LocalCache implements vscode.Disposable {
   }
 
   markMessagesSynced(conversationId: string): void {
-    this.ensureDb().run("UPDATE messages SET synced = 1 WHERE conversation_id = ?", [conversationId]);
+    if (!this.db) {
+      return;
+    }
+    this.db.run("UPDATE messages SET synced = 1 WHERE conversation_id = ?", [conversationId]);
     this.persist();
   }
 
@@ -257,7 +279,10 @@ export class LocalCache implements vscode.Disposable {
   // ── Query Helper ──
 
   private queryRows<T>(sql: string, params?: SqlValue[]): T[] {
-    const db = this.ensureDb();
+    if (!this.db) {
+      return [];
+    }
+    const db = this.db;
     const stmt = db.prepare(sql);
     if (params) {
       stmt.bind(params);

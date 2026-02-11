@@ -3,27 +3,39 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { BaseExtractor } from "./base-extractor.js";
-import { withSqliteReader, type SqliteReader } from "../utils/sqlite-reader.js";
+import { withSqliteReader } from "../utils/sqlite-reader.js";
 import type { Conversation, Message } from "../models/types.js";
 
-interface CursorComposerMessage {
-  readonly type?: number;
-  readonly text?: string;
-  readonly role?: string;
-  readonly createdAt?: number;
-  readonly model?: string;
-}
-
-interface CursorComposerData {
+/**
+ * Composer metadata from the "composer.composerData" key.
+ */
+interface ComposerHead {
   readonly composerId?: string;
   readonly name?: string;
-  readonly messages?: readonly CursorComposerMessage[];
   readonly createdAt?: number;
-  readonly updatedAt?: number;
+  readonly lastUpdatedAt?: number;
+  readonly unifiedMode?: string;
 }
 
-interface CursorComposerStore {
-  readonly allComposers?: readonly CursorComposerData[];
+interface ComposerStore {
+  readonly allComposers?: readonly ComposerHead[];
+}
+
+/**
+ * Cursor aiService.prompts entry: contains full user prompt text.
+ */
+interface CursorPromptEntry {
+  readonly text?: string;
+}
+
+/**
+ * Cursor aiService.generations entry: metadata about what was generated.
+ */
+interface CursorGenerationEntry {
+  readonly unixMs?: number;
+  readonly generationUUID?: string;
+  readonly type?: string;
+  readonly textDescription?: string;
 }
 
 export class CursorExtractor extends BaseExtractor {
@@ -68,8 +80,12 @@ export class CursorExtractor extends BaseExtractor {
 
         const vscdbPath = path.join(basePath, ws.name, "state.vscdb");
         if (await this.pathExists(vscdbPath)) {
-          const convs = await this.extractFromVscdb(vscdbPath);
-          conversations.push(...convs);
+          try {
+            const convs = await this.extractFromVscdb(vscdbPath);
+            conversations.push(...convs);
+          } catch {
+            // Individual workspace failure shouldn't stop others
+          }
         }
       }
     } catch {
@@ -80,120 +96,160 @@ export class CursorExtractor extends BaseExtractor {
   }
 
   private async extractFromVscdb(dbPath: string): Promise<Conversation[]> {
+    return await withSqliteReader(dbPath, (reader) => {
+      if (!reader.tableExists("ItemTable")) {
+        return [];
+      }
+
+      const conversations: Conversation[] = [];
+
+      // Strategy 1: Read aiService.prompts + aiService.generations
+      const promptsVal = reader.getKeyValue("ItemTable", "aiService.prompts");
+      const genVal = reader.getKeyValue("ItemTable", "aiService.generations");
+
+      if (promptsVal && genVal) {
+        const convs = this.parseAiServiceData(promptsVal, genVal, dbPath);
+        conversations.push(...convs);
+      }
+
+      // Strategy 2: If nothing from aiService, try composer metadata
+      if (conversations.length === 0) {
+        const composerVal = reader.getKeyValue("ItemTable", "composer.composerData");
+        if (composerVal) {
+          const convs = this.parseComposerMetadata(composerVal, dbPath);
+          conversations.push(...convs);
+        }
+      }
+
+      return conversations;
+    });
+  }
+
+  private parseAiServiceData(
+    promptsJson: string,
+    generationsJson: string,
+    dbPath: string,
+  ): Conversation[] {
     try {
-      return await withSqliteReader(dbPath, (reader) => {
-        // Cursor uses cursorDiskKV table
-        if (!reader.tableExists("cursorDiskKV")) {
-          // Fallback: try ItemTable (older Cursor versions)
-          if (reader.tableExists("ItemTable")) {
-            return this.extractFromItemTable(reader, dbPath);
-          }
-          return [];
+      const prompts = JSON.parse(promptsJson) as CursorPromptEntry[];
+      const generations = JSON.parse(generationsJson) as CursorGenerationEntry[];
+
+      if (!Array.isArray(prompts) || prompts.length === 0) {
+        return [];
+      }
+
+      // All prompts+generations in one workspace form a single conversation stream.
+      const convIdInput = `cursor:${dbPath}:aiService`;
+      const convId = this.deterministicId(convIdInput);
+      const messages: Message[] = [];
+
+      for (let i = 0; i < prompts.length; i++) {
+        const prompt = prompts[i];
+        const gen = Array.isArray(generations) && i < generations.length ? generations[i] : undefined;
+
+        const promptText = prompt?.text ?? "";
+        const timestamp = gen?.unixMs
+          ? new Date(gen.unixMs).toISOString()
+          : new Date().toISOString();
+
+        if (promptText.trim()) {
+          messages.push({
+            id: this.deterministicId(`${convIdInput}:user:${i}`),
+            conversationId: convId,
+            role: "user",
+            content: promptText,
+            sourceModel: null,
+            timestamp,
+            metadata: {},
+          });
         }
 
-        // Look for composer data key
-        const value = reader.getKeyValue("cursorDiskKV", "composer.composerData");
-        if (!value) {
-          return [];
+        // Generations only have textDescription (short summary), not full responses.
+        if (gen?.textDescription?.trim()) {
+          messages.push({
+            id: this.deterministicId(`${convIdInput}:assistant:${i}`),
+            conversationId: convId,
+            role: "assistant",
+            content: `[Generated: ${gen.textDescription}]`,
+            sourceModel: null,
+            timestamp,
+            metadata: {
+              generationType: gen.type ?? "unknown",
+              generationUUID: gen.generationUUID ?? "",
+            },
+          });
         }
+      }
 
-        return this.parseComposerData(value, dbPath);
-      });
+      if (messages.length === 0) {
+        return [];
+      }
+
+      return [{
+        id: convId,
+        title: this.deriveTitle(messages),
+        sourceIde: "cursor",
+        sourceHash: this.generateSourceHash("cursor", messages),
+        workspacePath: this.extractWorkspaceFromPath(dbPath),
+        createdAt: messages[0]?.timestamp ?? new Date().toISOString(),
+        updatedAt: messages[messages.length - 1]?.timestamp ?? new Date().toISOString(),
+        messages,
+      }];
     } catch {
       return [];
     }
   }
 
-  private extractFromItemTable(reader: SqliteReader, dbPath: string): Conversation[] {
-    const value = reader.getKeyValue("ItemTable", "composer.composerData");
-    if (!value) {
-      return [];
-    }
-    return this.parseComposerData(value, dbPath);
-  }
-
-  private parseComposerData(jsonValue: string, dbPath: string): Conversation[] {
+  private parseComposerMetadata(jsonValue: string, dbPath: string): Conversation[] {
     try {
-      const data = JSON.parse(jsonValue) as CursorComposerStore;
+      const data = JSON.parse(jsonValue) as ComposerStore;
       if (!data.allComposers) {
         return [];
       }
 
-      return data.allComposers
-        .map((composer) => this.composerToConversation(composer, dbPath))
-        .filter((c): c is Conversation => c !== null);
+      const conversations: Conversation[] = [];
+
+      for (const composer of data.allComposers) {
+        if (!composer.name && !composer.composerId) {
+          continue;
+        }
+
+        const convIdInput = `cursor:${dbPath}:${composer.composerId ?? "unknown"}`;
+        const convId = this.deterministicId(convIdInput);
+        const title = composer.name ?? "Untitled";
+        const createdAt = composer.createdAt
+          ? new Date(composer.createdAt).toISOString()
+          : new Date().toISOString();
+        const updatedAt = composer.lastUpdatedAt
+          ? new Date(composer.lastUpdatedAt).toISOString()
+          : createdAt;
+
+        const messages: Message[] = [{
+          id: this.deterministicId(`${convIdInput}:meta:0`),
+          conversationId: convId,
+          role: "user",
+          content: title,
+          sourceModel: null,
+          timestamp: createdAt,
+          metadata: { stub: true, mode: composer.unifiedMode ?? "unknown" },
+        }];
+
+        conversations.push({
+          id: convId,
+          title,
+          sourceIde: "cursor",
+          sourceHash: this.generateSourceHash("cursor", messages),
+          workspacePath: this.extractWorkspaceFromPath(dbPath),
+          createdAt,
+          updatedAt,
+          messages,
+        });
+      }
+
+      return conversations;
     } catch {
       return [];
     }
-  }
-
-  private composerToConversation(composer: CursorComposerData, dbPath: string): Conversation | null {
-    if (!composer.messages || composer.messages.length === 0) {
-      return null;
-    }
-
-    const convIdInput = `cursor:${dbPath}:${composer.composerId ?? "unknown"}`;
-    const convId = this.deterministicId(convIdInput);
-    const messages: Message[] = [];
-
-    for (const msg of composer.messages) {
-      const text = msg.text?.trim();
-      if (!text) {
-        continue;
-      }
-
-      const role = this.mapCursorRole(msg.type, msg.role);
-      const timestamp = msg.createdAt
-        ? new Date(msg.createdAt).toISOString()
-        : new Date().toISOString();
-
-      messages.push({
-        id: this.deterministicId(`${convIdInput}:${messages.length}`),
-        conversationId: convId,
-        role,
-        content: text,
-        sourceModel: msg.model ?? null,
-        timestamp,
-        metadata: {},
-      });
-    }
-
-    if (messages.length === 0) {
-      return null;
-    }
-
-    const createdAt = composer.createdAt
-      ? new Date(composer.createdAt).toISOString()
-      : messages[0]?.timestamp ?? new Date().toISOString();
-
-    const updatedAt = composer.updatedAt
-      ? new Date(composer.updatedAt).toISOString()
-      : messages[messages.length - 1]?.timestamp ?? createdAt;
-
-    return {
-      id: convId,
-      title: composer.name ?? this.deriveTitle(messages),
-      sourceIde: "cursor",
-      sourceHash: this.generateSourceHash("cursor", messages),
-      workspacePath: this.extractWorkspaceFromPath(dbPath),
-      createdAt,
-      updatedAt,
-      messages,
-    };
-  }
-
-  private mapCursorRole(type: number | undefined, role: string | undefined): "user" | "assistant" | "system" {
-    // Cursor message types: 1 = user, 2 = assistant
-    if (type === 1) {
-      return "user";
-    }
-    if (type === 2) {
-      return "assistant";
-    }
-    if (role) {
-      return this.normalizeRole(role);
-    }
-    return "assistant";
   }
 
   private extractWorkspaceFromPath(dbPath: string): string | null {
@@ -212,10 +268,9 @@ export class CursorExtractor extends BaseExtractor {
   }
 
   watchForChanges(cb: (conv: Conversation) => void): vscode.Disposable {
-    // SQLite files don't work well with fs.watch, so we poll mtime every 10s
     this.pollTimer = setInterval(() => {
       void this.pollForChanges(cb);
-    }, 10_000);
+    }, 15_000);
 
     return {
       dispose: () => {
@@ -253,7 +308,6 @@ export class CursorExtractor extends BaseExtractor {
 
           this.knownMtimes.set(vscdbPath, currentMtime);
 
-          // Only trigger callback if we've seen this file before (skip initial scan)
           if (lastMtime !== undefined) {
             const convs = await this.extractFromVscdb(vscdbPath);
             for (const conv of convs) {

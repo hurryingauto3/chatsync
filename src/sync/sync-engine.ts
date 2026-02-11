@@ -19,13 +19,16 @@ export class SyncEngine implements vscode.Disposable {
   private readonly extractorDisposables: vscode.Disposable[] = [];
   private syncInProgress = false;
   private lastSyncedAt: string | null = null;
+  private readonly log: vscode.OutputChannel;
 
   constructor(
     private readonly authManager: AuthManager,
     private readonly supabase: SupabaseClientWrapper,
     private readonly cache: LocalCache,
     private readonly extractors: readonly ChatExtractor[],
-  ) {}
+  ) {
+    this.log = vscode.window.createOutputChannel("ChatSync");
+  }
 
   async initialize(): Promise<void> {
     // Start watching all available extractors
@@ -112,20 +115,28 @@ export class SyncEngine implements vscode.Disposable {
 
   private async extractFromAllSources(): Promise<void> {
     const userId = this.authManager.authState.userId ?? "";
+    this.log.appendLine(`[sync] Starting extraction, ${this.extractors.length} extractors registered`);
 
     for (const extractor of this.extractors) {
+      const ide = extractor.sourceIde;
       try {
         const available = await extractor.isAvailable();
         if (!available) {
+          this.log.appendLine(`[${ide}] Not available, skipping`);
           continue;
         }
 
+        this.log.appendLine(`[${ide}] Available, extracting...`);
         const conversations = await extractor.extractAll();
+        this.log.appendLine(`[${ide}] Found ${conversations.length} conversations`);
+
         for (const conv of conversations) {
+          this.log.appendLine(`[${ide}]   "${conv.title.slice(0, 60)}" (${conv.messages.length} msgs)`);
           this.storeConversationLocally(conv, userId);
         }
-      } catch {
-        // Individual extractor failure shouldn't stop sync
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.log.appendLine(`[${ide}] ERROR: ${msg}`);
       }
     }
   }

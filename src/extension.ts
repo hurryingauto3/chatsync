@@ -101,15 +101,41 @@ async function initializeAsync(
   supabaseClient: SupabaseClientWrapper,
   engine: SyncEngine,
 ): Promise<void> {
+  const log = vscode.window.createOutputChannel("ChatSync");
+
   try {
+    log.appendLine("[init] Initializing local cache...");
     await localCache.initialize();
+    log.appendLine("[init] Local cache OK");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.appendLine(`[init] Local cache FAILED: ${msg}`);
+    void vscode.window.showErrorMessage(`ChatSync: Cache init failed: ${msg}`);
+    return; // Can't proceed without cache
+  }
+
+  try {
+    log.appendLine("[init] Initializing auth...");
     await authManager.initialize();
+    log.appendLine(`[init] Auth OK (authenticated: ${authManager.authState.authenticated})`);
+
     if (authManager.authState.authenticated) {
+      log.appendLine("[init] Initializing Supabase client...");
       await supabaseClient.initialize();
+      log.appendLine("[init] Supabase client OK");
     }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.appendLine(`[init] Auth/Supabase init failed (non-fatal): ${msg}`);
+  }
+
+  try {
+    log.appendLine("[init] Initializing sync engine...");
     await engine.initialize();
-  } catch {
-    // Non-fatal: extension works offline with local extraction only
+    log.appendLine("[init] Sync engine OK");
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.appendLine(`[init] Sync engine FAILED: ${msg}`);
   }
 }
 

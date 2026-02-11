@@ -1,14 +1,6 @@
-import initSqlJs, { type Database as SqlJsDatabase, type SqlJsStatic, type SqlValue } from "sql.js";
+import { type Database as SqlJsDatabase, type SqlValue } from "sql.js";
 import * as fs from "node:fs";
-
-let sqlJsPromise: Promise<SqlJsStatic> | null = null;
-
-function getSqlJs(): Promise<SqlJsStatic> {
-  if (!sqlJsPromise) {
-    sqlJsPromise = initSqlJs();
-  }
-  return sqlJsPromise;
-}
+import { getSqlJs } from "./sql-init.js";
 
 /**
  * Safe SQLite reader utility using sql.js (pure JS, no native deps).
