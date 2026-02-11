@@ -166,7 +166,7 @@ export class LocalCache implements vscode.Disposable {
 
     const rows = this.queryRows<ConversationDbRow>(
       `SELECT * FROM conversations ${where} ORDER BY updated_at DESC LIMIT ? OFFSET ?`,
-      [...params, limit, offset],
+      [...params, limit, offset] as SqlValue[],
     );
 
     return rows.map((row) => {

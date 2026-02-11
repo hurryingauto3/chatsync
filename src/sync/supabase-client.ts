@@ -200,8 +200,10 @@ export class SupabaseClientWrapper implements vscode.Disposable {
       await this.client.removeChannel(this.realtimeChannel);
     }
 
-    this.realtimeChannel = this.client
-      .channel("chatsync-changes")
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Supabase realtime type overloads are overly strict
+    const channel = this.client.channel("chatsync-changes") as any;
+
+    this.realtimeChannel = channel
       .on(
         "postgres_changes",
         { event: "*", schema: "public", table: "conversations" },
@@ -220,7 +222,7 @@ export class SupabaseClientWrapper implements vscode.Disposable {
           }
         },
       )
-      .subscribe();
+      .subscribe() as RealtimeChannel;
   }
 
   unsubscribeFromChanges(): void {

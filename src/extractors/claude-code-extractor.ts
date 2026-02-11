@@ -175,7 +175,7 @@ export class ClaudeCodeExtractor extends BaseExtractor {
 
     let watcher: fs.FSWatcher | undefined;
     try {
-      watcher = fs.watch(projectsDir, { recursive: true }, (eventType, filename) => {
+      watcher = fs.watch(projectsDir, { recursive: true }, (_eventType, filename) => {
         if (typeof filename === "string" && filename.endsWith(".jsonl")) {
           const fullPath = path.join(projectsDir, filename);
           void this.parseJsonlFile(fullPath).then((conv) => {
