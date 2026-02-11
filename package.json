@@ -1,0 +1,106 @@
+{
+  "name": "chatsync",
+  "displayName": "ChatSync - Cross-IDE AI Chat Sync",
+  "description": "Sync AI chat history across VS Code, Cursor, Antigravity, and Claude Code CLI",
+  "version": "0.1.0",
+  "publisher": "chatsync",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Chat",
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "chatsync-sidebar",
+          "title": "ChatSync",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "chatsync-sidebar": [
+        {
+          "type": "webview",
+          "id": "chatsync.sidebarView",
+          "name": "Chat History"
+        }
+      ]
+    },
+    "chatParticipants": [
+      {
+        "id": "chatsync.participant",
+        "fullName": "ChatSync",
+        "name": "chatsync",
+        "description": "Browse and continue AI conversations from any IDE",
+        "isSticky": false,
+        "commands": [
+          {
+            "name": "recent",
+            "description": "Show last 5 conversations across all IDEs"
+          },
+          {
+            "name": "continue",
+            "description": "Continue the last conversation with full context"
+          },
+          {
+            "name": "search",
+            "description": "Full-text search all synced chats"
+          },
+          {
+            "name": "from",
+            "description": "Filter conversations by source IDE"
+          }
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "chatsync.signIn",
+        "title": "ChatSync: Sign In with GitHub"
+      },
+      {
+        "command": "chatsync.signOut",
+        "title": "ChatSync: Sign Out"
+      },
+      {
+        "command": "chatsync.syncNow",
+        "title": "ChatSync: Sync Now"
+      },
+      {
+        "command": "chatsync.configureSupabase",
+        "title": "ChatSync: Configure Supabase Connection"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.config.mjs --production",
+    "watch": "node esbuild.config.mjs --watch",
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.79.0",
+    "sql.js": "^1.11.0"
+  },
+  "devDependencies": {
+    "@types/sql.js": "^1.4.9",
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "esbuild": "^0.21.0",
+    "typescript": "^5.5.0"
+  }
+}
