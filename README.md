@@ -1,258 +1,256 @@
-# ChatSync
+<p align="center">
+  <img src="icon.png" alt="ChatSync Logo" width="128" height="128" />
+</p>
 
-Cross-IDE AI chat history sync. Extracts conversations from GitHub Copilot, Cursor, Antigravity, and Claude Code CLI, stores them in a local SQLite cache, and optionally syncs to Supabase for access across machines and IDEs.
+<h1 align="center">ChatSync</h1>
 
-## Problem
+<p align="center">
+  <strong>All your AI conversations. One place. Every IDE.</strong>
+</p>
 
-If you use multiple AI coding tools, you know the pain: you hit a rate limit in Cursor, switch to Copilot, and lose all context from your previous conversation. Or you work in Claude Code CLI on your laptop, then want to pick up that thread in VS Code on your desktop. Every tool silos its chat history in its own proprietary format, in its own local directory.
+<p align="center">
+  <a href="https://marketplace.visualstudio.com/items?itemName=hurryingauto3.chatsync">
+    <img src="https://img.shields.io/visual-studio-marketplace/v/hurryingauto3.chatsync?label=VS%20Code%20Marketplace&color=4F46E5&style=flat-square" alt="VS Code Marketplace" />
+  </a>
+  <a href="https://open-vsx.org/extension/hurryingauto3/chatsync">
+    <img src="https://img.shields.io/open-vsx/v/hurryingauto3/chatsync?label=Open%20VSX&color=10B981&style=flat-square" alt="Open VSX" />
+  </a>
+  <a href="https://github.com/hurryingauto3/chatsync/blob/main/LICENSE.txt">
+    <img src="https://img.shields.io/github/license/hurryingauto3/chatsync?style=flat-square&color=gray" alt="License" />
+  </a>
+</p>
 
-ChatSync reads all of them, normalizes them into a single format, and lets you browse, search, and continue any conversation from any IDE.
+---
 
-## How It Works
+## The Problem
 
-```
-Local IDE chat files
-  (Copilot JSON, Cursor SQLite, Claude JSONL, Antigravity JSON)
-        |
-        v
-  Chat Extractors (per-IDE parsers)
-        |
-        v
-  Local SQLite Cache (offline-first)
-        |
-        v
-  Supabase (PostgreSQL + Realtime)
-        |
-        v
-  Any other machine running ChatSync
-```
+You use Copilot, Cursor, Claude Code, and Antigravity — sometimes in the same hour. Each one keeps its chat history locked in its own format, in its own directory. When you switch tools, you lose all context.
 
-1. **Extractors** read chat history files from each IDE's local storage directory.
-2. Conversations are deduplicated by content hash and stored in a **local SQLite cache** (via sql.js, pure JavaScript, no native dependencies).
-3. If configured, the cache syncs bidirectionally with a **Supabase** PostgreSQL database. Realtime subscriptions push changes to other connected clients within seconds.
-4. A **sidebar webview** lets you browse, search, and filter all conversations. A **chat participant** (`@chatsync`) lets you inject prior conversation context directly into your current chat session.
+**ChatSync fixes this.** It reads chat history from every AI coding tool you use, merges it into one searchable timeline, and optionally syncs it to the cloud so it follows you across machines.
 
-## Supported IDEs and Tools
+## ✨ Features
 
-| Source | Format | Location |
-|--------|--------|----------|
-| GitHub Copilot | JSON (`workspace-chunks.json`) or SQLite (`state.vscdb`) | `~/Library/Application Support/Code/User/workspaceStorage/` |
-| Cursor | SQLite (`state.vscdb`, `cursorDiskKV` table) | `~/Library/Application Support/Cursor/User/workspaceStorage/` |
-| Claude Code CLI | JSONL | `~/.claude/projects/` |
-| Antigravity | JSON | `~/.gemini/antigravity/conversations/` |
+- 🔍 **Unified Chat History** — Browse all your AI conversations in one sidebar, no matter which tool created them
+- 🔄 **Cross-IDE Sync** — Start a conversation in Cursor, continue it in Copilot, pick it up in Claude Code
+- ☁️ **Cloud Sync** — Optional Supabase backend syncs conversations across all your machines in real-time
+- 💬 **Context Injection** — Use `@chatsync /continue` to inject a previous conversation into your current chat
+- 🔌 **Offline First** — Works fully offline. Cloud sync is optional and additive
+- 🔒 **Privacy First** — All credentials stored in your OS keychain. Read-only access to IDE files
 
-Paths shown are for macOS. Linux and Windows equivalents are handled automatically.
+## 🛠 Supported Tools
 
-## Requirements
+| Tool | Status | How It Works |
+|------|--------|--------------|
+| **GitHub Copilot** | ✅ Supported | Reads local JSON/SQLite chat files |
+| **Cursor** | ✅ Supported | Reads SQLite database (`cursorDiskKV`) |
+| **Claude Code CLI** | ✅ Supported | Reads JSONL project files |
+| **Antigravity** | ✅ Supported | Reads JSON conversation files |
 
-- VS Code `>=1.90.0`, Cursor, Antigravity, or VSCodium
-- Node.js 20+ (for development)
-- A Supabase project (free tier works fine) if you want cloud sync
+> Works on **macOS**, **Linux**, and **Windows**. File paths are resolved automatically per OS.
 
-Cloud sync is optional. The extension works fully offline with local extraction and caching.
+## 🚀 Quick Start
 
-## Installation
+### 1. Install
 
-### From Source
+**From Marketplace:**
 
+Search for **"ChatSync"** in the VS Code / Cursor / Antigravity extension sidebar and click Install.
+
+**From Source:**
 ```bash
 git clone https://github.com/hurryingauto3/chatsync.git
 cd chatsync
 npm install
 npm run build
-```
-
-This produces `dist/extension.js`. To install it locally:
-
-```bash
 npx @vscode/vsce package
-code --install-extension chatsync-0.1.0.vsix
+code --install-extension chatsync-*.vsix
 ```
 
-### Development
+### 2. Extract Your Chats
 
-```bash
-npm run watch
+Once installed, ChatSync automatically detects and extracts conversations from all supported tools. Open the **ChatSync** sidebar (💬 icon in the activity bar) to browse them.
+
+That's it for local use — no account needed, no configuration required.
+
+### 3. Enable Cloud Sync _(Optional)_
+
+If you want your conversations to follow you across machines:
+
+<details>
+<summary><strong>☁️ Set Up Supabase (5 minutes)</strong></summary>
+
+1. **Create a free project** at [supabase.com](https://supabase.com)
+
+2. **Run the schema migration** — go to SQL Editor and paste:
+
+```sql
+-- Create tables
+CREATE TABLE conversations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT 'Untitled',
+  source_ide TEXT NOT NULL,
+  source_hash TEXT UNIQUE,
+  workspace_path TEXT,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE messages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source_model TEXT,
+  timestamp TIMESTAMPTZ DEFAULT NOW(),
+  metadata JSONB DEFAULT '{}'
+);
+
+-- Indexes
+CREATE INDEX idx_conv_user ON conversations(user_id);
+CREATE INDEX idx_conv_updated ON conversations(updated_at DESC);
+CREATE INDEX idx_conv_hash ON conversations(source_hash);
+CREATE INDEX idx_msg_conv ON messages(conversation_id);
+
+-- Disable RLS for personal use (enable + add policies for multi-user)
+ALTER TABLE conversations DISABLE ROW LEVEL SECURITY;
+ALTER TABLE messages DISABLE ROW LEVEL SECURITY;
+
+-- Enable realtime
+ALTER PUBLICATION supabase_realtime ADD TABLE conversations, messages;
 ```
 
-Then press `F5` in VS Code to launch the Extension Development Host.
+3. **Configure the extension** — run these commands from the command palette (`Cmd+Shift+P`):
+   - **`ChatSync: Configure Supabase Connection`** — enter your project URL and anon key
+   - **`ChatSync: Sign In with GitHub`** — authenticates you
 
-## Supabase Setup
+4. **Sync** — run **`ChatSync: Sync Now`** or wait for the automatic sync cycle
 
-If you want cloud sync across machines, you need a Supabase project. If you only want local extraction and browsing, skip this section entirely.
+</details>
 
-### 1. Create the Database Schema
-
-Go to your Supabase project dashboard, open the **SQL Editor**, and run the contents of `supabase/migrations/001_initial.sql`. This creates:
-
-- `conversations` table with RLS policies scoped to `auth.uid()`
-- `messages` table with RLS policies scoped to the owning conversation
-- Indexes on user ID, update timestamp, content hash, and conversation foreign keys
-- Realtime publication on both tables
-
-### 2. Deploy the Edge Function
-
-The `github-auth` edge function exchanges a GitHub OAuth token (obtained from VS Code's built-in authentication API) for a Supabase JWT. This avoids exposing any service role keys to the client.
-
-```bash
-supabase login
-supabase link --project-ref YOUR_PROJECT_REF
-supabase functions deploy github-auth
-```
-
-The function requires these environment variables (set automatically by Supabase):
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_ANON_KEY`
-
-### 3. Configure the Extension
-
-Run the command **ChatSync: Configure Supabase Connection** from the command palette. You will be prompted for:
-
-1. Your Supabase project URL (e.g., `https://xxxxx.supabase.co`)
-2. Your Supabase anon (public) key
-
-Both are stored in `vscode.SecretStorage` (OS keychain). They are never written to disk, settings files, or globalState.
-
-### 4. Sign In
-
-Run **ChatSync: Sign In with GitHub** or click the sign-in button in the sidebar. This uses VS Code's built-in GitHub authentication provider. You will see the standard "Allow extension to use GitHub?" prompt once. The resulting GitHub token is exchanged for a Supabase JWT via the edge function. The JWT is stored in the OS keychain and auto-refreshed before expiry.
-
-## Usage
+## 💬 Usage
 
 ### Sidebar
 
-The ChatSync sidebar appears in the activity bar (chat bubble icon). It shows:
+The ChatSync sidebar appears in the activity bar. It shows:
 
-- All extracted conversations, sorted by last update
-- Filter buttons for each source IDE
-- A search bar for full-text search across message content
-- Click any conversation to expand its full message thread
-- "Continue in Chat" button to open the conversation context in your editor
+- All conversations across every tool, sorted by most recent
+- Filter buttons to show only Copilot, Cursor, Claude, or Antigravity chats
+- Full-text search across all message content
+- Click any conversation to read the full thread
 
 ### Chat Participant
 
-Type `@chatsync` in the VS Code chat panel to use the following commands:
+Type `@chatsync` in the VS Code chat panel:
 
-| Command | Description |
+| Command | What It Does |
 |---------|-------------|
-| `@chatsync /recent` | Show the last 5 conversations across all IDEs |
-| `@chatsync /continue [query]` | Inject the most recent (or matching) conversation as context |
-| `@chatsync /search <query>` | Full-text search all synced conversations |
-| `@chatsync /from <ide>` | Filter by source IDE (`copilot`, `cursor`, `antigravity`, `claude-code`) |
+| `@chatsync /recent` | Shows your 5 most recent conversations across all tools |
+| `@chatsync /continue [query]` | Injects a previous conversation as context into your current chat |
+| `@chatsync /search <query>` | Searches all synced conversations |
+| `@chatsync /from <ide>` | Filters by tool (`copilot`, `cursor`, `antigravity`, `claude-code`) |
 
-`/continue` formats the last 10 messages of the selected conversation into the chat response, giving the AI full context to pick up where the previous session left off.
+> **Pro tip:** Use `/continue` when switching between IDEs. It feeds the AI your last conversation so you can pick up exactly where you left off.
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `ChatSync: Sign In with GitHub` | Authenticate via GitHub OAuth |
+| `ChatSync: Sync Now` | Trigger a full sync cycle |
+| `ChatSync: Sign In with GitHub` | Authenticate for cloud sync |
 | `ChatSync: Sign Out` | Clear stored credentials |
-| `ChatSync: Sync Now` | Trigger a full sync cycle manually |
 | `ChatSync: Configure Supabase Connection` | Set Supabase URL and anon key |
+| `ChatSync: Toggle AI Chat Capture` | Enable/disable network-level chat interception |
 
-### Sync Behavior
+## 🏗 How It Works
 
-- **Extraction**: On activation and periodically, extractors scan local IDE chat files.
-- **Upload**: New or updated conversations are pushed to Supabase (if authenticated).
-- **Download**: Remote conversations from other machines are pulled into the local cache.
-- **Realtime**: Supabase Realtime subscriptions push changes from other clients within seconds.
-- **Offline**: If the network is unavailable, writes queue in the local SQLite cache and flush on reconnect.
-- **Deduplication**: `source_hash` (SHA-256 of source IDE + first 3 messages) prevents duplicate imports. Enforced by a UNIQUE constraint.
-- **Conflict resolution**: Last-write-wins by `updated_at`. Conversations are append-only, so conflicts are rare in practice.
+```
+┌──────────────────────────────────────────────────────┐
+│                   Your Machine                        │
+│                                                       │
+│  Copilot ─┐                                          │
+│  Cursor  ─┤                                          │
+│  Claude  ─┼──▶ Extractors ──▶ Local SQLite Cache ──┐ │
+│  Antigrav ┘                                         │ │
+│                                                      │ │
+└──────────────────────────────────────────────────────┘ │
+                                                         │
+                                              ┌──────────▼──────────┐
+                                              │  Supabase (cloud)   │
+                                              │  PostgreSQL + RT    │
+                                              └──────────┬──────────┘
+                                                         │
+┌──────────────────────────────────────────────────────┐ │
+│               Your Other Machine                      │ │
+│                                                       │ │
+│  Local SQLite Cache ◀──────────────────────────────── │
+│       │                                               │
+│       ▼                                               │
+│  Browse / Search / Continue                            │
+└──────────────────────────────────────────────────────┘
+```
 
-## Architecture
+1. **Extractors** parse chat files from each tool's local storage (read-only, never modifies IDE data)
+2. **Local cache** stores everything in an in-process SQLite database (via sql.js — zero native deps)
+3. **Cloud sync** pushes to Supabase with deduplication by content hash and real-time subscriptions
+4. **Other machines** pull the same data and merge it into their local cache
+
+## 🔒 Security & Privacy
+
+- **OS Keychain storage** — all credentials (Supabase URL, keys, tokens) are stored in `vscode.SecretStorage`, backed by macOS Keychain / Linux libsecret / Windows Credential Manager
+- **Read-only file access** — extractors open IDE databases in read-only mode
+- **Strict CSP** — webview uses `default-src 'none'` with nonce-based script loading
+- **No telemetry** — ChatSync collects zero telemetry or usage data
+- **Your data stays yours** — you own the Supabase project; there's no shared backend
+
+## 🧑‍💻 Development
+
+```bash
+# Clone and install
+git clone https://github.com/hurryingauto3/chatsync.git
+cd chatsync
+npm install
+
+# Development (watch mode)
+npm run watch
+# Then press F5 in VS Code to launch Extension Development Host
+
+# Build for production
+npm run build
+
+# Package as .vsix
+npx @vscode/vsce package
+
+# Publish to both marketplaces
+./scripts/publish.sh
+```
 
 ### Project Structure
 
 ```
 src/
-  extension.ts              # Activation, registers all components
-  auth/
-    auth-manager.ts          # GitHub session -> Supabase JWT exchange
-  extractors/
-    base-extractor.ts        # Abstract base with hashing, dedup, role normalization
-    copilot-extractor.ts     # Reads Copilot workspace-chunks.json and state.vscdb
-    cursor-extractor.ts      # Reads Cursor state.vscdb (cursorDiskKV table)
-    claude-code-extractor.ts # Reads Claude CLI JSONL files
-    antigravity-extractor.ts # Reads Antigravity conversation JSON files
-  sync/
-    local-cache.ts           # SQLite cache (sql.js), mirrors Supabase schema + sync state
-    supabase-client.ts       # Supabase client wrapper with CRUD and realtime
-    sync-engine.ts           # Orchestrates extract -> cache -> upload -> download
-  chat/
-    chat-participant.ts      # @chatsync chat participant with slash commands
-  webview/
-    sidebar-provider.ts      # WebviewViewProvider, inline HTML with strict CSP
-    ui/
-      styles.css             # VS Code theme-aware styles
-  models/
-    types.ts                 # All TypeScript types and interfaces
-  utils/
-    sqlite-reader.ts         # Read-only SQLite utility (sql.js)
-supabase/
-  migrations/
-    001_initial.sql          # Database schema, indexes, RLS policies, realtime
-  functions/
-    github-auth/
-      index.ts               # Deno edge function for GitHub token exchange
+  extension.ts              # Entry point
+  auth/                     # GitHub OAuth + Supabase auth
+  extractors/               # Per-IDE chat history parsers
+  interceptor/              # Network-level AI chat capture
+  sync/                     # SQLite cache + Supabase sync engine
+  chat/                     # @chatsync chat participant
+  webview/                  # Sidebar UI
+  models/                   # TypeScript types
+  utils/                    # Shared utilities
 ```
 
-### Security
+## 📦 Dependencies
 
-- **No plaintext secrets.** All credentials (Supabase URL, anon key, JWT, refresh token) are stored in `vscode.SecretStorage`, which is backed by the OS keychain (Keychain on macOS, libsecret on Linux, Credential Manager on Windows).
-- **No API keys in code.** The Supabase anon key is provided by the user once and stored encrypted.
-- **Strict CSP on webviews.** `default-src 'none'; style-src ${cspSource}; script-src 'nonce-${nonce}'`. No inline scripts, no external resources.
-- **Row-Level Security.** Every Supabase query is scoped to `auth.uid()`. Users can only read and write their own data.
-- **Read-only file access.** Extractors open IDE databases in read-only mode to avoid corrupting IDE state.
-- **Edge Function for auth.** The GitHub-to-Supabase token exchange happens server-side. No service role keys are exposed to the client.
+Only two runtime dependencies, both bundled:
 
-### TypeScript
+| Package | Purpose |
+|---------|---------|
+| `@supabase/supabase-js` | Cloud sync (auth, database, realtime) |
+| `sql.js` | Pure JS SQLite for local cache + reading IDE databases |
 
-The project uses strict TypeScript with the following compiler options enabled:
+No native modules. The production bundle is ~320KB + 644KB wasm.
 
-- `strict: true`
-- `noImplicitAny: true`
-- `strictNullChecks: true`
-- `noUnusedLocals: true`
-- `noUnusedParameters: true`
-- `noImplicitReturns: true`
+## 📄 License
 
-There are no `any` types in the codebase, with one annotated exception for a Supabase Realtime API type compatibility workaround.
-
-### SSH Remote
-
-The extension is declared as `"extensionKind": ["ui"]`, which means it always runs on the local machine, even when connected to a remote SSH workspace. This is intentional: chat history files live on the local machine, and Supabase connections go through the local network. The sidebar and chat participant work identically in remote sessions.
-
-## Dependencies
-
-| Package | Purpose | Size Impact |
-|---------|---------|-------------|
-| `@supabase/supabase-js` | Supabase client (auth, database, realtime) | Bundled |
-| `sql.js` | Pure JavaScript SQLite (reads IDE databases and local cache) | Bundled |
-
-No native dependencies. The production bundle is ~286KB minified.
-
-## Development
-
-```bash
-# Install dependencies
-npm install
-
-# Type check
-npx tsc --noEmit
-
-# Build (production, minified)
-npm run build
-
-# Watch mode (development)
-npm run watch
-
-# Package as .vsix
-npm run package
-```
-
-## License
-
-MIT
+[MIT](LICENSE.txt) — use it however you want.
