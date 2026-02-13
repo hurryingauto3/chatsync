@@ -3,8 +3,9 @@
   "displayName": "ChatSync - Cross-IDE AI Chat Sync",
   "description": "Sync AI chat history across VS Code, Cursor, Antigravity, and Claude Code CLI",
   "version": "0.2.8",
-  "publisher": "chatsync",
+  "publisher": "hurryingauto3",
   "license": "MIT",
+  "icon": "icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/hurryingauto3/chatsync.git"
