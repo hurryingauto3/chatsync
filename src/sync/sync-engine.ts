@@ -28,6 +28,14 @@ export class SyncEngine implements vscode.Disposable {
     private readonly extractors: readonly ChatExtractor[],
   ) {
     this.log = vscode.window.createOutputChannel("ChatSync");
+
+    // Auto-sync when authentication state changes
+    this.authManager.onAuthStateChanged((state) => {
+      if (state.authenticated) {
+        this.log.appendLine("[sync] Auth detected, starting background sync...");
+        void this.fullSync();
+      }
+    });
   }
 
   async initialize(): Promise<void> {
@@ -56,28 +64,44 @@ export class SyncEngine implements vscode.Disposable {
 
   async fullSync(): Promise<void> {
     if (this.syncInProgress) {
+      this.log.appendLine("[sync] Sync already in progress, skipping");
       return;
     }
     this.syncInProgress = true;
+    this.log.appendLine("[sync] ═══ Full Sync Started ═══");
 
     try {
       // Phase 1: Extract from all local IDEs
+      this.log.appendLine("[sync] Phase 1: Extracting from local sources...");
       await this.extractFromAllSources();
+
+      const totalLocal = this.cache.getConversations({}).length;
+      this.log.appendLine(`[sync] Local cache has ${totalLocal} conversations total`);
 
       // Phase 2: Upload unsynced local data to Supabase
       if (this.authManager.authState.authenticated) {
+        this.log.appendLine(`[sync] Phase 2: Uploading unsynced... (userId=${this.authManager.authState.userId})`);
+        const unsynced = this.cache.getUnsyncedConversations();
+        this.log.appendLine(`[sync]   ${unsynced.length} conversations pending upload`);
         await this.uploadUnsynced();
+      } else {
+        this.log.appendLine("[sync] Phase 2: SKIPPED — not authenticated");
       }
 
       // Phase 3: Download remote conversations
       if (this.authManager.authState.authenticated) {
+        this.log.appendLine("[sync] Phase 3: Downloading remote conversations...");
         await this.downloadRemote();
+      } else {
+        this.log.appendLine("[sync] Phase 3: SKIPPED — not authenticated");
       }
 
       this.lastSyncedAt = new Date().toISOString();
       this._onSyncEvent.fire({ type: "sync-complete" });
+      this.log.appendLine("[sync] ═══ Full Sync Complete ═══");
     } catch (err) {
       const message = err instanceof Error ? err.message : "Unknown sync error";
+      this.log.appendLine(`[sync] ═══ Full Sync FAILED: ${message} ═══`);
       this._onSyncEvent.fire({ type: "sync-error", error: message });
     } finally {
       this.syncInProgress = false;
@@ -141,7 +165,7 @@ export class SyncEngine implements vscode.Disposable {
     }
   }
 
-  private handleExtractedConversation(conv: Conversation): void {
+  public handleExtractedConversation(conv: Conversation): void {
     const userId = this.authManager.authState.userId ?? "";
     this.storeConversationLocally(conv, userId);
 
@@ -182,7 +206,11 @@ export class SyncEngine implements vscode.Disposable {
     }
 
     for (const conv of unsynced) {
-      await this.uploadConversation(conv, userId);
+      try {
+        await this.uploadConversation(conv, userId);
+      } catch (err) {
+        this.log.appendLine(`[sync] Failed to upload conversation ${conv.id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
@@ -232,12 +260,15 @@ export class SyncEngine implements vscode.Disposable {
           metadata: m.metadata,
         }));
         await this.supabase.insertMessages(messageRows);
+        this.log.appendLine(`[sync] Created new remote conversation: ${conv.title}`);
       }
+
 
       this.cache.markConversationSynced(conv.id);
       this.cache.markMessagesSynced(conv.id);
-    } catch {
-      // Upload failed — will retry on next sync. Data is safe in local cache.
+    } catch (err) {
+      this.log.appendLine(`[sync] ERR: Upload failed for "${conv.title}": ${err instanceof Error ? err.message : String(err)}`);
+      throw err; // Re-throw to be caught by fullSync()
     }
   }
 

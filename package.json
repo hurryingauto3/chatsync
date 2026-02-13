@@ -2,7 +2,7 @@
   "name": "chatsync",
   "displayName": "ChatSync - Cross-IDE AI Chat Sync",
   "description": "Sync AI chat history across VS Code, Cursor, Antigravity, and Claude Code CLI",
-  "version": "0.1.1",
+  "version": "0.2.8",
   "publisher": "chatsync",
   "license": "MIT",
   "repository": {
@@ -85,8 +85,31 @@
       {
         "command": "chatsync.configureSupabase",
         "title": "ChatSync: Configure Supabase Connection"
+      },
+      {
+        "command": "chatsync.toggleInterceptor",
+        "title": "ChatSync: Toggle AI Chat Capture"
+      },
+      {
+        "command": "chatsync.testNetwork",
+        "title": "ChatSync: Test Network Interceptor"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "ChatSync",
+      "properties": {
+        "chatsync.interceptor.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable transparent capture of AI chat messages from Copilot, Antigravity, and other AI extensions. Captured data stays local unless you enable cloud sync."
+        },
+        "chatsync.interceptor.maxBodySizeKB": {
+          "type": "number",
+          "default": 512,
+          "description": "Maximum response body size to capture (KB). Responses larger than this are truncated."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run build",

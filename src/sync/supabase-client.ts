@@ -29,21 +29,11 @@ export class SupabaseClientWrapper implements vscode.Disposable {
     if (!config) {
       return;
     }
-    await this.createClient(config);
+    this.createClient(config);
   }
 
-  private async createClient(config: SupabaseConfig): Promise<void> {
-    const accessToken = await this.authManager.getAccessToken();
-    if (!accessToken) {
-      return;
-    }
-
+  private createClient(config: SupabaseConfig): void {
     this.client = createClient(config.url, config.anonKey, {
-      global: {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      },
       auth: {
         persistSession: false,
         autoRefreshToken: false,
@@ -55,21 +45,25 @@ export class SupabaseClientWrapper implements vscode.Disposable {
     if (!this.client) {
       const config = await this.authManager.getSupabaseConfig();
       if (!config) {
-        throw new Error("Supabase not configured");
+        throw new Error("Supabase not configured — run 'ChatSync: Configure Supabase Connection'");
       }
-      await this.createClient(config);
+      this.createClient(config);
     }
     if (!this.client) {
       throw new Error("Failed to create Supabase client");
     }
 
-    // Refresh the auth header
+    // Set/refresh the auth session (skip if no token — anon key mode)
     const token = await this.authManager.getAccessToken();
     if (token) {
-      await this.client.auth.setSession({
-        access_token: token,
-        refresh_token: "",
-      });
+      try {
+        await this.client.auth.setSession({
+          access_token: token,
+          refresh_token: "",
+        });
+      } catch {
+        // setSession can fail with invalid tokens — continue with anon key
+      }
     }
 
     return this.client;

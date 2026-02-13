@@ -2,7 +2,7 @@ import type * as vscode from "vscode";
 
 // ── Source IDEs ──
 
-export type SourceIde = "copilot" | "cursor" | "antigravity" | "claude-code";
+export type SourceIde = "copilot" | "cursor" | "antigravity" | "claude-code" | "intercepted";
 
 export type MessageRole = "user" | "assistant" | "system";
 

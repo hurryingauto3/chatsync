@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import type { AuthState, SupabaseConfig } from "../models/types.js";
+import { SharedConfig } from "../utils/shared-config.js";
 
 const GITHUB_SCOPES = ["read:user", "user:email"];
 const SECRET_KEY_SUPABASE_URL = "chatsync.supabaseUrl";
@@ -37,8 +38,58 @@ export class AuthManager implements vscode.Disposable {
   }
 
   async initialize(): Promise<void> {
-    // Check if we already have a valid JWT
+    // 1. Sync secrets from SharedConfig if missing
+    const shared = SharedConfig.load();
+    if (Object.keys(shared).length > 0) {
+      console.log("[AuthManager] Loading shared config from ~/.chatsync/config.json");
+    }
+    if (shared.supabaseUrl) {
+      const currentUrl = await this.secrets.get(SECRET_KEY_SUPABASE_URL);
+      if (!currentUrl) {
+        await this.secrets.store(SECRET_KEY_SUPABASE_URL, shared.supabaseUrl);
+      }
+    }
+    if (shared.supabaseAnonKey) {
+      const currentKey = await this.secrets.get(SECRET_KEY_SUPABASE_ANON);
+      if (!currentKey) {
+        await this.secrets.store(SECRET_KEY_SUPABASE_ANON, shared.supabaseAnonKey);
+      }
+    }
+    if (shared.supabaseJwt) {
+      const currentJwt = await this.secrets.get(SECRET_KEY_SUPABASE_JWT);
+      if (!currentJwt) {
+        await this.secrets.store(SECRET_KEY_SUPABASE_JWT, shared.supabaseJwt);
+      }
+    }
+    if (shared.supabaseRefreshToken) {
+      const currentRefresh = await this.secrets.get(SECRET_KEY_SUPABASE_REFRESH);
+      if (!currentRefresh) {
+        await this.secrets.store(SECRET_KEY_SUPABASE_REFRESH, shared.supabaseRefreshToken);
+      }
+    }
+
+    // 2. Check if we already have a valid JWT or are in anon-key-mode
     const jwt = await this.secrets.get(SECRET_KEY_SUPABASE_JWT);
+    if (jwt === "anon-key-mode") {
+      // Previously signed in with anon-key-mode — generate deterministic UUID
+      const crypto = await import("crypto");
+      const label = shared.supabaseJwt === "anon-key-mode" ? "user" : "anonymous";
+      const hash = crypto.createHash("sha256").update(label).digest("hex");
+      const anonUserId = [
+        hash.slice(0, 8),
+        hash.slice(8, 12),
+        "4" + hash.slice(13, 16),
+        "a" + hash.slice(17, 20),
+        hash.slice(20, 32),
+      ].join("-");
+      this._authState = {
+        authenticated: true,
+        userId: anonUserId,
+        githubUsername: null,
+      };
+      this._onAuthStateChanged.fire(this._authState);
+      return;
+    }
     if (jwt) {
       const userId = this.parseUserIdFromJwt(jwt);
       if (userId && !this.isJwtExpired(jwt)) {
@@ -70,54 +121,98 @@ export class AuthManager implements vscode.Disposable {
   }
 
   private async performSignIn(config: SupabaseConfig): Promise<AuthState> {
-    // Get GitHub session from VS Code's built-in auth
-    const session = await vscode.authentication.getSession(
-      "github",
-      GITHUB_SCOPES,
-      { createIfNone: true },
-    );
-
-    // Exchange GitHub token for Supabase JWT via Edge Function
-    const response = await fetch(
-      `${config.url}/functions/v1/github-auth`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${config.anonKey}`,
-        },
-        body: JSON.stringify({
-          github_token: session.accessToken,
-        }),
-      },
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Auth failed: ${errorText}`);
+    // Get GitHub session from VS Code's built-in auth (for identity)
+    let githubUsername = "anonymous";
+    try {
+      const session = await vscode.authentication.getSession(
+        "github",
+        GITHUB_SCOPES,
+        { createIfNone: true },
+      );
+      githubUsername = session.account.label;
+    } catch {
+      // GitHub auth not available — continue without it
     }
 
-    const tokenData: TokenResponse = await response.json() as TokenResponse;
+    // Try Supabase sign-in using the built-in anonymous auth
+    const { createClient } = await import("@supabase/supabase-js");
+    const tempClient = createClient(config.url, config.anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
 
-    // Store tokens securely
-    await this.secrets.store(SECRET_KEY_SUPABASE_JWT, tokenData.access_token);
-    await this.secrets.store(SECRET_KEY_SUPABASE_REFRESH, tokenData.refresh_token);
+    try {
+      // Try anonymous sign-in first (requires Supabase anon auth enabled)
+      const { data, error } = await tempClient.auth.signInAnonymously();
+      if (error) {
+        throw error;
+      }
 
-    this._authState = {
-      authenticated: true,
-      userId: tokenData.user.id,
-      githubUsername: session.account.label,
-    };
+      const accessToken = data.session?.access_token ?? "";
+      const refreshToken = data.session?.refresh_token ?? "";
+      const userId = data.user?.id ?? crypto.randomUUID();
 
-    this._onAuthStateChanged.fire(this._authState);
-    this.scheduleRefresh(tokenData.access_token);
+      // Store tokens securely
+      await this.secrets.store(SECRET_KEY_SUPABASE_JWT, accessToken);
+      await this.secrets.store(SECRET_KEY_SUPABASE_REFRESH, refreshToken);
 
-    return this._authState;
+      SharedConfig.save({
+        supabaseJwt: accessToken,
+        supabaseRefreshToken: refreshToken,
+      });
+
+      this._authState = {
+        authenticated: true,
+        userId,
+        githubUsername,
+      };
+
+      this._onAuthStateChanged.fire(this._authState);
+      if (accessToken) {
+        this.scheduleRefresh(accessToken);
+      }
+
+      return this._authState;
+    } catch {
+      // Anonymous auth not enabled — fall back to anon-key-only mode.
+      // This works if RLS is disabled or uses anon key policies.
+      // Generate a deterministic UUID from the GitHub username
+      const crypto = await import("crypto");
+      const hash = crypto.createHash("sha256").update(githubUsername).digest("hex");
+      const userId = [
+        hash.slice(0, 8),
+        hash.slice(8, 12),
+        "4" + hash.slice(13, 16), // UUID v4 format
+        "a" + hash.slice(17, 20), // variant bits
+        hash.slice(20, 32),
+      ].join("-");
+
+      // Store a sentinel value so we know we're "authenticated"
+      await this.secrets.store(SECRET_KEY_SUPABASE_JWT, "anon-key-mode");
+
+      SharedConfig.save({
+        supabaseJwt: "anon-key-mode",
+      });
+
+      this._authState = {
+        authenticated: true,
+        userId,
+        githubUsername,
+      };
+
+      this._onAuthStateChanged.fire(this._authState);
+      return this._authState;
+    }
   }
 
   async signOut(): Promise<void> {
     await this.secrets.delete(SECRET_KEY_SUPABASE_JWT);
     await this.secrets.delete(SECRET_KEY_SUPABASE_REFRESH);
+    
+    // Also remove from shared config
+    SharedConfig.save({
+      supabaseJwt: undefined,
+      supabaseRefreshToken: undefined,
+    });
 
     if (this._refreshTimer) {
       clearTimeout(this._refreshTimer);
@@ -135,6 +230,10 @@ export class AuthManager implements vscode.Disposable {
   async getAccessToken(): Promise<string | null> {
     const jwt = await this.secrets.get(SECRET_KEY_SUPABASE_JWT);
     if (!jwt) {
+      return null;
+    }
+    // In anon-key-mode, no JWT is used — the client works with just the anon key
+    if (jwt === "anon-key-mode") {
       return null;
     }
     if (this.isJwtExpired(jwt)) {
@@ -188,6 +287,12 @@ export class AuthManager implements vscode.Disposable {
 
     await this.secrets.store(SECRET_KEY_SUPABASE_URL, url.replace(/\/$/, ""));
     await this.secrets.store(SECRET_KEY_SUPABASE_ANON, anonKey);
+
+    // Also store in shared config
+    SharedConfig.save({
+      supabaseUrl: url.replace(/\/$/, ""),
+      supabaseAnonKey: anonKey,
+    });
   }
 
   private async refreshToken(): Promise<string | null> {
@@ -219,6 +324,12 @@ export class AuthManager implements vscode.Disposable {
       const tokenData: TokenResponse = await response.json() as TokenResponse;
       await this.secrets.store(SECRET_KEY_SUPABASE_JWT, tokenData.access_token);
       await this.secrets.store(SECRET_KEY_SUPABASE_REFRESH, tokenData.refresh_token);
+
+      // Update shared config
+      SharedConfig.save({
+        supabaseJwt: tokenData.access_token,
+        supabaseRefreshToken: tokenData.refresh_token,
+      });
 
       this._authState = {
         ...this._authState,

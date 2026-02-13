@@ -242,6 +242,7 @@ export class ChatSyncParticipant implements vscode.Disposable {
       cursor: "Cursor",
       antigravity: "Antigravity",
       "claude-code": "Claude Code",
+      intercepted: "Intercepted",
     };
     return labels[ide];
   }
